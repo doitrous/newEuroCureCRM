@@ -27,7 +27,10 @@ import {
 export const dynamic = "force-dynamic";
 
 function integrations(): IntegrationStatus[] {
-  const facebook = Boolean(process.env.FACEBOOK_APP_SECRET && process.env.FACEBOOK_WEBHOOK_VERIFY_TOKEN);
+  const facebook = Boolean(
+    (process.env.FACEBOOK_APP_SECRET || process.env.META_APP_SECRET)
+      && (process.env.FACEBOOK_WEBHOOK_VERIFY_TOKEN || process.env.META_VERIFY_TOKEN),
+  );
   const instagram = Boolean(process.env.INSTAGRAM_APP_SECRET && process.env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN);
   return [
     { key: "facebook", label: "Facebook", configured: facebook, evidence: facebook ? "Webhook secret and verify token are present." : "Missing Facebook webhook/app credentials." },

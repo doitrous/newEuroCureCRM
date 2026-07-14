@@ -13,6 +13,7 @@ import type {
   LeadRef,
   MessageInsert,
   MetaStore,
+  PatientSourceApplication,
   ReactionInsert,
   StoredComment,
   StoredMessage,
@@ -80,6 +81,40 @@ export class SupabaseMetaStore implements MetaStore {
 
   constructor(db: Db = supabaseAdmin()) {
     this.db = db;
+  }
+
+  async applyPatientSource(input: PatientSourceApplication, incomingSourceKey: string): Promise<string> {
+    let effectiveSourceKey = incomingSourceKey;
+    if (input.leadId) {
+      const { data, error } = await this.db.rpc("crm_apply_patient_source", {
+        target_lead_id: input.leadId,
+        incoming_source_key: incomingSourceKey,
+        source_context: { event_key: input.eventKey, ingestion: "meta" },
+      });
+      if (error) throw new Error(`applyPatientSource: ${error.message}`);
+      if (data) effectiveSourceKey = String(data);
+    }
+
+    const updates: PromiseLike<unknown>[] = [];
+    if (input.messageId) {
+      updates.push(this.db.from(MESSAGES).update({ patient_source_key: effectiveSourceKey }).eq("id", input.messageId));
+    }
+    if (input.commentId) {
+      updates.push(this.db.from(COMMENTS).update({ patient_source_key: effectiveSourceKey }).eq("id", input.commentId));
+    }
+    if (input.leadId) {
+      updates.push(this.db.from(CONVERSATIONS).update({ patient_source_key: effectiveSourceKey }).eq("lead_id", input.leadId));
+    }
+    updates.push(this.db.from("crm_ingest_logs").update({ patient_source_key: effectiveSourceKey }).eq("event_key", input.eventKey));
+    updates.push(this.db.from("crm_conversation_events").update({ patient_source_key: effectiveSourceKey }).eq("event_key", input.eventKey));
+
+    const results = await Promise.all(updates);
+    const failed = results.find((result) => {
+      const candidate = result as { error?: { message?: string } | null };
+      return Boolean(candidate.error);
+    }) as { error?: { message?: string } | null } | undefined;
+    if (failed?.error) throw new Error(`applyPatientSource(event rows): ${failed.error.message || "update failed"}`);
+    return effectiveSourceKey;
   }
 
   /* ── leads ─────────────────────────────────────────────────────────── */

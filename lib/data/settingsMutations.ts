@@ -3,6 +3,7 @@ import { supabaseAdmin } from "@/lib/supabase/server";
 import { writeActor } from "@/lib/data/actor";
 import { assertCan } from "@/lib/auth/permissions";
 import { logActivity } from "@/lib/audit/log";
+import { patientSourceFromValue } from "@/lib/patient-source/catalog";
 
 /**
  * Write side for the Settings backbone (§C). Every mutation here:
@@ -37,6 +38,14 @@ export async function upsertTag(input: {
 
   if (input.id) {
     const { data: before } = await db.from("lead_tags").select("name,color,is_active,display_order").eq("id", input.id).maybeSingle();
+    const { data: patientSource } = await db
+      .from("crm_patient_sources")
+      .select("display_label")
+      .eq("tag_id", input.id)
+      .maybeSingle();
+    if (patientSource && (name !== patientSource.display_label || input.isActive === false)) {
+      throw new SettingsError("Canonical patient-source tags cannot be renamed or disabled.");
+    }
     const patch = {
       name,
       color: input.color ?? null,
@@ -55,6 +64,10 @@ export async function upsertTag(input: {
       newValues: patch,
     });
     return;
+  }
+
+  if (patientSourceFromValue(name)) {
+    throw new SettingsError("This name is reserved for a canonical patient source.");
   }
 
   const { data, error } = await db

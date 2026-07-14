@@ -13,7 +13,9 @@ const PUBLIC_PREFIXES = [
   "/api/webhooks",
   "/api/ingest",
   "/api/crm/ingest",
+  "/api/crm/mirror",
   "/api/cron",
+  "/api/health",
 ];
 
 function isPublic(pathname: string): boolean {

@@ -38,9 +38,13 @@ npm run build
    Migration `0026_dashboard_metrics.sql` is additive and should be applied
    before or alongside this release; the application retains a slower fallback
    during a rolling deployment.
+   Apply `0035_patient_source_continuity.sql` after `0034`; it is required
+   before enabling the migrated n8n endpoints.
 3. Run `npm ci`, `npm run build`, then `npm run start` (port 3100).
 4. Schedule `POST /api/cron/overdue-emails` with `Authorization: Bearer
    <CRON_SECRET>`. Do not place the secret in a URL for new schedulers.
+5. Configure Coolify to check `GET /api/health` and review the full standalone
+   deployment checklist in `docs/DEPLOYMENT.md`.
 
 The booking integration and messaging/email integrations degrade independently
 when they are not configured; CRM authentication and the CRM service-role key

@@ -18,6 +18,13 @@ export interface LeadRef {
   leadCode: string;
 }
 
+export interface PatientSourceApplication {
+  eventKey: string;
+  leadId: string | null;
+  messageId: string | null;
+  commentId: string | null;
+}
+
 export interface ConversationRef {
   id: string;
   leadId: string | null;
@@ -299,6 +306,13 @@ export interface IngestLogInsert {
 }
 
 export interface MetaStore {
+  /**
+   * Reconciles a canonical patient source after an event has been persisted.
+   * Existing lead/patient sources win; missing sources are filled, canonical
+   * tags are synchronized, and event rows receive the effective source key.
+   */
+  applyPatientSource(input: PatientSourceApplication, incomingSourceKey: string): Promise<string>;
+
   // ── leads ──────────────────────────────────────────────────────────────
   findLeadByPlatformUser(platform: Platform, platformUserId: string): Promise<LeadRef | null>;
   findLeadByConversationKey(conversationKey: string): Promise<LeadRef | null>;

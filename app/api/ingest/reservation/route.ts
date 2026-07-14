@@ -10,6 +10,8 @@ import {
   type RevisitingMatch,
 } from "@/lib/booking/revisiting";
 import { phoneDuplicateKey } from "@/lib/phoneMatching";
+import { resolvePatientSource } from "@/lib/patient-source/catalog";
+import { applyPatientSourceToLead } from "@/lib/patient-source/server";
 
 /**
  * Booking → CRM ingest receiver.
@@ -170,6 +172,20 @@ export async function POST(req: Request) {
     );
   }
 
+  // The route is the EuroCure website booking receiver, so the old system's
+  // confirmed EuroCure fallback is safe when no marker is present. An explicit
+  // unknown/ambiguous source is never allowed to fall through that default.
+  const sourceResolution = resolvePatientSource([raw], { fallbackToEuroCure: true });
+  if (sourceResolution.status !== "resolved") {
+    return NextResponse.json(
+      { ok: false, error: sourceResolution.status === "ambiguous" ? "ambiguous_patient_source" : "unsupported_patient_source" },
+      { status: 422 },
+    );
+  }
+  if (sourceResolution.usedFallback) {
+    console.warn("Reservation ingest used confirmed EuroCure source fallback", { count: 1 });
+  }
+
   const db = supabaseAdmin();
   const now = new Date().toISOString();
   const normalizedPhone = normalizePhone(body.phoneCountryCode, body.phoneNumber);
@@ -223,6 +239,10 @@ export async function POST(req: Request) {
       });
       return NextResponse.json({ ok: false, error: "lead_update_failed" }, { status: 500 });
     }
+    await applyPatientSourceToLead(String(byAppt.id), sourceResolution.source.id, {
+      origin: "reservation_retry",
+      appointment_id: body.bookingAppointmentId,
+    });
     return NextResponse.json({ ok: true, action: "updated", leadId: byAppt.id, leadCode: byAppt.lead_id, revisiting: isRevisitingMetadata(byAppt.metadata) });
   }
 
@@ -299,6 +319,10 @@ export async function POST(req: Request) {
     }, { onConflict: "appointment_id" });
     if (linkError) return NextResponse.json({ ok: false, error: "booking_link_failed" }, { status: 500 });
     await assignRevisitingPatientTag(matchedLead.id);
+    await applyPatientSourceToLead(matchedLead.id, sourceResolution.source.id, {
+      origin: "reservation_revisit",
+      appointment_id: body.bookingAppointmentId,
+    });
     return NextResponse.json({ ok: true, action: "linked", leadId: matchedLead.id, leadCode: matchedLead.lead_id, revisiting: true, matchedBy });
   }
 
@@ -317,6 +341,7 @@ export async function POST(req: Request) {
     service_name: body.serviceName ?? null,
     booking_appointment_id: body.bookingAppointmentId,
     source_id: process.env.CRM_BOOKING_SOURCE_ID || null,
+    patient_source_key: sourceResolution.source.id,
     escalation_status: "none",
     has_unread: true,
     unread_since: now,
@@ -341,6 +366,10 @@ export async function POST(req: Request) {
     });
     return NextResponse.json({ ok: false, error: "insert_failed" }, { status: 500 });
   }
+  await applyPatientSourceToLead(String(created.id), sourceResolution.source.id, {
+    origin: "reservation_create",
+    appointment_id: body.bookingAppointmentId,
+  });
   const { error: linkError } = await db.from("crm_lead_booking_links").upsert({
     lead_id: created.id,
     appointment_id: body.bookingAppointmentId,

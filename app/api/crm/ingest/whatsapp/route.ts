@@ -3,6 +3,8 @@ import { supabaseAdmin } from "@/lib/supabase/server";
 import { whatsappIngestSecret } from "@/lib/whatsapp/config";
 import { secretsEqual } from "@/lib/security/secrets";
 import { matchablePhoneDigits } from "@/lib/phoneMatching";
+import { resolvePatientSource, type PatientSourceId } from "@/lib/patient-source/catalog";
+import { applyPatientSourceToLead } from "@/lib/patient-source/server";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -36,6 +38,15 @@ type Payload = {
   statusOnly?: boolean;
   rawPayload?: unknown;
   messageMetadata?: Record<string, unknown>;
+  source?: unknown;
+  sourceId?: unknown;
+  source_id?: unknown;
+  patientSource?: unknown;
+  patient_source?: unknown;
+  ownership_tag?: unknown;
+  ingestion_profile?: unknown;
+  tags?: unknown;
+  patientSourceKey?: PatientSourceId;
 };
 
 const MAX_BODY_BYTES = 1_000_000;
@@ -183,6 +194,7 @@ async function leadFor(input: Payload): Promise<{ id: string; lead_id: string }>
       last_incoming_at: input.direction === "outgoing" ? null : now,
       last_outgoing_at: input.direction === "outgoing" ? now : null,
       escalation_status: "none",
+      patient_source_key: input.patientSourceKey || null,
     })
     .select("id,lead_id")
     .single();
@@ -199,14 +211,22 @@ async function ingestOne(input: Payload) {
 
   const { data: existing, error: existingError } = await db
     .from("crm_messages")
-    .select("id")
+    .select("id,lead_id")
     .eq("platform", "whatsapp")
     .eq("platform_message_id", input.messageId)
     .maybeSingle();
   if (existingError) throw new Error(`whatsappMessage(find): ${existingError.message}`);
   if (existing?.id) {
+    let effectiveSourceKey = input.patientSourceKey!;
+    if (existing.lead_id) {
+      effectiveSourceKey = await applyPatientSourceToLead(String(existing.lead_id), input.patientSourceKey!, {
+        origin: "whatsapp_retry",
+        platform_message_id: input.messageId,
+      });
+      await db.from("crm_messages").update({ patient_source_key: effectiveSourceKey }).eq("id", existing.id);
+    }
     const updates = await updateExistingMessage(db, existing.id as string, input, statusAt);
-    return { messageId: existing.id as string, inserted: false, ...updates };
+    return { messageId: existing.id as string, inserted: false, patientSource: effectiveSourceKey, ...updates };
   }
 
   if (input.statusOnly) {
@@ -214,6 +234,10 @@ async function ingestOne(input: Payload) {
   }
 
   const lead = await leadFor(input);
+  const effectiveSourceKey = await applyPatientSourceToLead(lead.id, input.patientSourceKey!, {
+    origin: "whatsapp_ingest",
+    platform_message_id: input.messageId,
+  });
 
   const media = Array.isArray(input.media) ? input.media : [];
   const deliveryStatus = direction === "outgoing" ? input.deliveryStatus ?? "sent" : input.deliveryStatus ?? null;
@@ -241,6 +265,7 @@ async function ingestOne(input: Payload) {
       service: "WhatsApp",
       raw_payload: input.rawPayload ?? {},
       message_metadata: input.messageMetadata ?? null,
+      patient_source_key: effectiveSourceKey,
     })
     .select("id")
     .single();
@@ -276,7 +301,7 @@ async function ingestOne(input: Payload) {
     metadata: { platform_message_id: input.messageId, source: "whatsapp" },
   });
 
-  return { leadId: lead.lead_id, messageId: message.id as string, inserted: true };
+  return { leadId: lead.lead_id, messageId: message.id as string, patientSource: effectiveSourceKey, inserted: true };
 }
 
 export async function POST(req: Request) {
@@ -309,11 +334,27 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: validationError }, { status: 422 });
     }
 
+    let fallbackCount = 0;
+    for (const input of inputs) {
+      const resolution = resolvePatientSource([input], { fallbackToEuroCure: true });
+      if (resolution.status !== "resolved") {
+        return NextResponse.json(
+          { ok: false, error: resolution.status === "ambiguous" ? "ambiguous_patient_source" : "unsupported_patient_source" },
+          { status: 422 },
+        );
+      }
+      input.patientSourceKey = resolution.source.id;
+      if (resolution.usedFallback) fallbackCount += 1;
+    }
+    if (fallbackCount > 0) {
+      console.warn("WhatsApp ingest used confirmed legacy EuroCure source fallback", { count: fallbackCount });
+    }
+
     // Keep ordering deterministic and avoid racing two messages into duplicate
     // lead creation for the same new phone number.
     const result = [];
     for (const input of inputs) result.push(await ingestOne(input));
-    return NextResponse.json({ ok: true, records: result });
+    return NextResponse.json({ ok: true, records: result, ...(fallbackCount ? { patientSourceFallbacks: fallbackCount } : {}) });
   } catch (error) {
     console.error("WhatsApp ingest failed", error);
     return NextResponse.json(

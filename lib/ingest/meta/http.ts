@@ -4,8 +4,8 @@ import { createHmac } from "node:crypto";
 import { NextResponse } from "next/server";
 
 import { secretsEqual } from "@/lib/security/secrets";
-import { toEvents } from "./normalize";
-import { ingestEvents } from "./persist";
+import { collectRecords, toEvents } from "./normalize";
+import { ingestEventsWithPatientSources, preparePatientSources } from "./patientSource";
 import { SupabaseMetaStore } from "./store.supabase";
 import { isCommentEvent } from "./types";
 
@@ -25,7 +25,7 @@ const MAX_BODY_BYTES = 1_000_000;
 const MAX_EVENTS = 500;
 
 function verifySignature(raw: string, header: string | null): boolean {
-  const secret = process.env.FACEBOOK_APP_SECRET;
+  const secret = process.env.FACEBOOK_APP_SECRET || process.env.META_APP_SECRET;
   if (!secret || !header?.startsWith("sha256=")) return false;
   const expected = createHmac("sha256", secret).update(raw, "utf8").digest("hex");
   return secretsEqual(header.slice(7), expected);
@@ -35,7 +35,11 @@ function verifyApiKey(req: Request): boolean {
   const expected = process.env.CRM_INGEST_API_KEY;
   if (!expected) return false;
   const bearer = req.headers.get("authorization");
-  const presented = bearer?.startsWith("Bearer ") ? bearer.slice(7) : req.headers.get("x-api-key");
+  const presented = bearer?.startsWith("Bearer ")
+    ? bearer.slice(7)
+    : req.headers.get("x-api-key")
+      ?? req.headers.get("x-crm-api-key")
+      ?? req.headers.get("x-crm-ingest-key");
   return secretsEqual(presented, expected);
 }
 
@@ -53,7 +57,7 @@ export type ExpectedRecord = "message" | "comment";
  * invisible.
  */
 export async function handleIngest(req: Request, expect?: ExpectedRecord) {
-  const configured = Boolean(process.env.FACEBOOK_APP_SECRET || process.env.CRM_INGEST_API_KEY);
+  const configured = Boolean(process.env.FACEBOOK_APP_SECRET || process.env.META_APP_SECRET || process.env.CRM_INGEST_API_KEY);
   if (!configured) {
     return NextResponse.json({ ok: false, error: "ingest_not_configured" }, { status: 503 });
   }
@@ -82,7 +86,9 @@ export async function handleIngest(req: Request, expect?: ExpectedRecord) {
   }
 
   let events;
+  let records;
   try {
+    records = collectRecords(body);
     events = toEvents(body);
   } catch (err) {
     // Return 200 so Meta stops retrying malformed input. Keep the diagnostic in
@@ -101,11 +107,34 @@ export async function handleIngest(req: Request, expect?: ExpectedRecord) {
     return NextResponse.json({ ok: false, error: "too_many_events", maximum: MAX_EVENTS }, { status: 413 });
   }
 
+  const prepared = preparePatientSources(records, {
+    ownership_tag: req.headers.get("x-crm-lead-tag"),
+    ingestion_profile: req.headers.get("x-crm-ingestion-profile"),
+    patient_source: req.headers.get("x-crm-patient-source"),
+  });
+  if (prepared.error) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: prepared.error.status === "ambiguous" ? "ambiguous_patient_source" : "unsupported_patient_source",
+      },
+      { status: 422 },
+    );
+  }
+  const fallbackCount = prepared.sources.filter((source) => source.usedFallback).length;
+  if (fallbackCount > 0) {
+    console.warn("CRM ingest used confirmed legacy EuroCure patient-source fallback", { count: fallbackCount });
+  }
+
   const mismatched = expect
     ? events.filter((e) => (isCommentEvent(e) ? "comment" : "message") !== expect).length
     : 0;
 
-  const { outcomes, errors } = await ingestEvents(new SupabaseMetaStore(), events);
+  const { outcomes, errors } = await ingestEventsWithPatientSources(
+    new SupabaseMetaStore(),
+    events,
+    prepared.sources,
+  );
   if (errors.length > 0) {
     console.error("Meta ingest event failures", {
       count: errors.length,
@@ -122,6 +151,7 @@ export async function handleIngest(req: Request, expect?: ExpectedRecord) {
       // A retry lands entirely in `skipped` — that is the success signal.
       skipped: outcomes.filter((o) => o.skipped).length,
       ...(mismatched > 0 ? { mismatched, expected: expect } : {}),
+      ...(fallbackCount > 0 ? { patientSourceFallbacks: fallbackCount } : {}),
       results: outcomes.map((o) => ({
         eventType: o.eventType,
         recordType: o.recordType,
@@ -146,7 +176,7 @@ export function handleVerify(req: Request) {
   const token = url.searchParams.get("hub.verify_token");
   const challenge = url.searchParams.get("hub.challenge");
 
-  const expected = process.env.FACEBOOK_WEBHOOK_VERIFY_TOKEN;
+  const expected = process.env.FACEBOOK_WEBHOOK_VERIFY_TOKEN || process.env.META_VERIFY_TOKEN;
   if (!expected) {
     return NextResponse.json({ ok: false, error: "verify_token_not_configured" }, { status: 503 });
   }

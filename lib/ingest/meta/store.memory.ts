@@ -16,6 +16,7 @@ import type {
   IngestLogInsert,
   LeadCreate,
   LeadRef,
+  PatientSourceApplication,
   MessageInsert,
   MetaStore,
   ReactionInsert,
@@ -24,6 +25,7 @@ import type {
   TimelineInsert,
 } from "./store";
 import type { Attachment, Platform } from "./types";
+import { effectivePatientSourceId, type PatientSourceId } from "@/lib/patient-source/catalog";
 
 export interface MemLead extends LeadRef {
   platform: string;
@@ -39,6 +41,8 @@ export interface MemLead extends LeadRef {
   replyOverdueAt: string | null;
   campaign: string | null;
   adName: string | null;
+  patientSourceKey: string | null;
+  tags: string[];
 }
 
 export interface MemAttribution {
@@ -82,6 +86,21 @@ export class MemoryStore implements MetaStore {
   timeline: TimelineInsert[] = [];
   audit: AuditInsert[] = [];
   logs: IngestLogInsert[] = [];
+  sourceApplications: (PatientSourceApplication & { incomingSourceKey: string; effectiveSourceKey: string })[] = [];
+
+  async applyPatientSource(input: PatientSourceApplication, incomingSourceKey: string): Promise<string> {
+    const lead = input.leadId ? this.leads.find((item) => item.id === input.leadId) : null;
+    const effectiveSourceKey = effectivePatientSourceId(
+      lead?.patientSourceKey as PatientSourceId | null | undefined,
+      incomingSourceKey as PatientSourceId,
+    );
+    if (lead) {
+      lead.patientSourceKey = effectiveSourceKey;
+      lead.tags = [effectiveSourceKey === "dr_ahmad_ghait" ? "Dr. Ahmad Ghait" : "EuroCure"];
+    }
+    this.sourceApplications.push({ ...input, incomingSourceKey, effectiveSourceKey });
+    return effectiveSourceKey;
+  }
 
   /* ── leads ─────────────────────────────────────────────────────────── */
 
@@ -110,6 +129,8 @@ export class MemoryStore implements MetaStore {
       replyOverdueAt: null,
       campaign: input.campaign,
       adName: input.adName,
+      patientSourceKey: null,
+      tags: [],
     };
     this.leads.push(lead);
     return lead;

@@ -611,7 +611,7 @@ export function collectRecords(body: unknown): Rec[] {
   if (Array.isArray(body)) return body.filter(isRec).flatMap((b) => collectRecords(b));
   if (!isRec(body)) return [];
 
-  for (const k of ["records", "events", "data", "items"]) {
+  for (const k of ["records", "events", "data", "items", "messages"]) {
     if (Array.isArray(body[k])) return (body[k] as unknown[]).filter(isRec).flatMap((b) => collectRecords(b));
   }
 

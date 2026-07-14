@@ -8,6 +8,8 @@ import { logActivity } from "@/lib/audit/log";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { forcedLeadName } from "@/lib/import/leadImportMapping";
 import { phoneDigits, phoneDuplicateKey } from "@/lib/phoneMatching";
+import { resolvePatientSource, type PatientSourceId } from "@/lib/patient-source/catalog";
+import { applyPatientSourceToLead } from "@/lib/patient-source/server";
 
 export interface LeadImportRowInput {
   rowIndex: number;
@@ -161,6 +163,8 @@ async function createImportedLead(
 ): Promise<{ leadId: string; uid: string }> {
   const db = supabaseAdmin();
   const validMrn = row.mrn && /^\d{1,9}$/.test(row.mrn.trim()) ? row.mrn.trim() : null;
+  const patientSource = resolvePatientSource([{ patient_source: row.source }]);
+  const patientSourceKey = patientSource.status === "resolved" ? patientSource.source.id : null;
   const { data, error } = await db.from("leads").insert({
     // `crm_prepare_lead` generates the sequential lead ID atomically. Omitting
     // it here removes one network round-trip per imported row.
@@ -172,6 +176,7 @@ async function createImportedLead(
     phone_number: row.phone?.trim() || null,
     platform: "manual",
     source_id: await sourceId("database", sourceCache),
+    patient_source_key: patientSourceKey,
     service_name: row.serviceName?.trim() || null,
     gender: row.gender ?? null,
     notes: row.notes?.trim() || null,
@@ -200,6 +205,14 @@ async function mergeImportedRow(match: ExistingMatch, row: LeadImportRowInput, e
   if (!current.notes && row.notes?.trim()) patch.notes = row.notes.trim();
   const { error } = await supabaseAdmin().from("leads").update(patch).eq("id", current.id);
   if (error) throw error;
+  const patientSource = resolvePatientSource([{ patient_source: row.source }]);
+  if (patientSource.status === "resolved") {
+    await applyPatientSourceToLead(current.id, patientSource.source.id as PatientSourceId, {
+      origin: "historical_import_merge",
+      import_id: importId ?? null,
+      row: row.rowIndex + 1,
+    });
+  }
 }
 
 export async function importLeadRows(rows: LeadImportRowInput[], options: LeadImportOptions): Promise<LeadImportResult> {

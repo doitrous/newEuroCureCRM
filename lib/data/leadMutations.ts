@@ -6,6 +6,8 @@ import { assertCan } from "@/lib/auth/permissions";
 import type { PipelineStage, ReferenceOption } from "@/lib/types";
 import { bookingCatalog } from "@/lib/booking/service";
 import { notifyLeadStatusChanged } from "@/lib/email/triggers";
+import { PATIENT_SOURCES } from "@/lib/patient-source/catalog";
+import { applyPatientSourceToLead } from "@/lib/patient-source/server";
 
 type NoteKey = "clientNotes" | "medicalHistory" | "generalNotes";
 
@@ -406,7 +408,34 @@ export async function updateLeadStage(params: {
 export async function setLeadTagAssignments(leadId: string, tagIds: string[]): Promise<string[]> {
   const actor = await writeLeadActor();
   const lead = await resolveLead(leadId);
-  const unique = [...new Set(tagIds.filter(Boolean))];
+  let unique = [...new Set(tagIds.filter(Boolean))];
+
+  const [{ data: leadSource, error: leadSourceError }, { data: sourceRows, error: sourceRowsError }] = await Promise.all([
+    supabaseAdmin().from("leads").select("patient_source_key").eq("id", lead.id).single(),
+    supabaseAdmin().from("crm_patient_sources").select("key,tag_id").eq("is_active", true),
+  ]);
+  if (leadSourceError) throw new Error(`leadPatientSource: ${leadSourceError.message}`);
+  if (sourceRowsError) throw new Error(`patientSources: ${sourceRowsError.message}`);
+  const sourceTagByKey = new Map((sourceRows ?? []).map((row) => [String(row.key), String(row.tag_id)]));
+  const sourceKeyByTag = new Map((sourceRows ?? []).map((row) => [String(row.tag_id), String(row.key)]));
+  const requestedSourceKeys = [...new Set(unique.map((id) => sourceKeyByTag.get(id)).filter(Boolean))] as string[];
+  const currentSourceKey = leadSource.patient_source_key ? String(leadSource.patient_source_key) : null;
+  if (requestedSourceKeys.length > 1) throw new LeadMutationError("A lead cannot have more than one patient source.");
+  if (currentSourceKey && requestedSourceKeys.length && requestedSourceKeys[0] !== currentSourceKey) {
+    throw new LeadMutationError("The existing patient source cannot be replaced through ordinary tag editing.");
+  }
+  if (!currentSourceKey && requestedSourceKeys.length === 1) {
+    await applyPatientSourceToLead(lead.id, requestedSourceKeys[0] as keyof typeof PATIENT_SOURCES, {
+      origin: "explicit_tag_edit",
+      actor_id: actor.id,
+    });
+  }
+  const effectiveSourceKey = currentSourceKey || requestedSourceKeys[0] || null;
+  const preservedSourceTagId = effectiveSourceKey ? sourceTagByKey.get(effectiveSourceKey) : null;
+  unique = [
+    ...unique.filter((id) => !sourceKeyByTag.has(id)),
+    ...(preservedSourceTagId ? [preservedSourceTagId] : []),
+  ];
 
   const { data: active, error: activeError } = await supabaseAdmin()
     .from("lead_tags")
@@ -883,6 +912,7 @@ export async function createManualLead(params: {
       phone_country_code: "+20",
       phone_number: phone,
       platform: params.platform || "manual",
+      patient_source_key: PATIENT_SOURCES.eurocure.id,
       source_id: params.sourceId || null,
       service_name: params.serviceName?.trim() || null,
       gender: params.gender ?? null,

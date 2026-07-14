@@ -9,6 +9,8 @@ import {
   type RevisitingMatch,
 } from "@/lib/booking/revisiting";
 import { phoneDuplicateKey } from "@/lib/phoneMatching";
+import { PATIENT_SOURCES } from "@/lib/patient-source/catalog";
+import { applyPatientSourceToLead } from "@/lib/patient-source/server";
 
 function normalizePhone(phone: string): string | null {
   const digits = phone.replace(/\D/g, "");
@@ -244,6 +246,10 @@ export async function syncReservationsToLeads(reservations: Reservation[]): Prom
     const byAppointment = linkedLead ?? legacyLead;
     if (byAppointment) {
       if (!linkedLead) await linkBooking(byAppointment.id, reservation.id);
+      await applyPatientSourceToLead(byAppointment.id, PATIENT_SOURCES.eurocure.id, {
+        origin: "website_booking_sync_existing",
+        appointment_id: reservation.id,
+      });
       result.set(reservation.id, {
         leadId: byAppointment.lead_id,
         revisiting: isRevisitingMetadata(byAppointment.metadata),
@@ -274,6 +280,10 @@ export async function syncReservationsToLeads(reservations: Reservation[]): Prom
         .eq("id", matchedLead.id);
       if (updateError) throw new Error(`syncReservation(link): ${updateError.message}`);
       await linkBooking(matchedLead.id as string, reservation.id);
+      await applyPatientSourceToLead(matchedLead.id as string, PATIENT_SOURCES.eurocure.id, {
+        origin: "website_booking_sync_revisit",
+        appointment_id: reservation.id,
+      });
       await assignRevisitingPatientTag(matchedLead.id as string);
       await logSystemLeadEvent({
         leadUid: matchedLead.id as string,
@@ -303,6 +313,7 @@ export async function syncReservationsToLeads(reservations: Reservation[]): Prom
         service_name: reservation.serviceName ?? null,
         booking_appointment_id: reservation.id,
         source_id: process.env.CRM_BOOKING_SOURCE_ID || null,
+        patient_source_key: PATIENT_SOURCES.eurocure.id,
         escalation_status: "none",
         has_unread: true,
         unread_since: now,
@@ -314,6 +325,10 @@ export async function syncReservationsToLeads(reservations: Reservation[]): Prom
       .select("id,lead_id")
       .single();
     if (createError) throw new Error(`syncReservation(create): ${createError.message}`);
+    await applyPatientSourceToLead(created.id as string, PATIENT_SOURCES.eurocure.id, {
+      origin: "website_booking_sync",
+      appointment_id: reservation.id,
+    });
     await linkBooking(created.id as string, reservation.id);
     await logSystemLeadEvent({
       leadUid: created.id as string,

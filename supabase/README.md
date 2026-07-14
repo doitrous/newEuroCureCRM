@@ -47,6 +47,12 @@ list, not `ls`:
    metadata **on top of** the baseline (e.g. `crm_lead_financials` has an FK to
    `leads`, created in `014`).
 
+The current last migration is `0035_patient_source_continuity.sql`. It is
+additive and idempotent: it seeds the two canonical patient sources, reconciles
+source-tag spelling variants, adds durable source keys to lead/patient/event
+rows, and installs preservation triggers for patient linking and duplicate
+merges. Apply it after `0034_exclude_database_patients_from_new_leads.sql`.
+
 `baseline/` is history, already applied — do not re-run it against the live
 database. New work goes in `migrations/` with the next `00NN_` number.
 
